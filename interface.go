@@ -70,8 +70,11 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 
 	err = incusprov.ConnectIncus()
 	if err != nil {
+		g.log.Error("Failed to connect to Incus", "error", err)
 		return provider.ProviderInfo{}, err
 	}
+
+	g.log.Info("Successfully connected to Incus", "image", g.IncusImage, "size", g.IncusInstanceSize, "naming", g.IncusNamingScheme)
 
 	return provider.ProviderInfo{
 		ID:        "incus",
@@ -135,12 +138,27 @@ func (g *InstanceGroup) Decrease(ctx context.Context, instances []string) (remov
 	g.log.Info("Deleting VMs", "instances", instances)
 
 	for _, name := range instances {
-		err = incusprov.DeleteVM(name)
-		if err != nil {
-			g.log.Error("Failed to delete VM", "name", name, "error", err)
+		// First check if VM exists in Incus
+		_, vmErr := incusprov.GetVM(name)
+		if vmErr != nil {
+			g.log.Info("VM already doesn't exist in Incus, marking as deleted", "name", name)
+			// VM doesn't exist, just mark as deleted in our state
+			g.m.Lock()
+			g.status[name] = provider.StateDeleted
+			save(g.StateFilePath, g.status)
+			g.m.Unlock()
+			removed = append(removed, name)
 			continue
 		}
 
+		// VM exists, try to delete it
+		deleteErr := incusprov.DeleteVM(name)
+		if deleteErr != nil {
+			g.log.Error("Failed to delete VM", "name", name, "error", deleteErr)
+			continue
+		}
+
+		g.log.Info("Successfully deleted VM", "name", name)
 		g.m.Lock()
 		g.status[name] = provider.StateDeleted
 		save(g.StateFilePath, g.status)
@@ -155,14 +173,20 @@ func (g *InstanceGroup) Decrease(ctx context.Context, instances []string) (remov
 // Increase requests more instances to be created. It returns how many
 // instances were successfully requested.
 func (g *InstanceGroup) Increase(ctx context.Context, delta int) (success int, err error) {
-	g.log.Info("Requesting VMs", "request_delta", delta)
+	g.log.Info("Requesting VM creation", "request_delta", delta)
 
 	g.m.Lock()
+	originalDelta := delta
+	creatingCount := 0
 	for id := range g.status {
 		if g.status[id] == provider.StateCreating {
+			g.log.Debug("Found VM in StateCreating", "vm", id, "status", g.status[id])
 			delta--
+			creatingCount++
 		}
 	}
+
+	g.log.Info("VM state analysis", "original_delta", originalDelta, "creating_vms", creatingCount, "adjusted_delta", delta)
 
 	namingScheme := g.IncusNamingScheme
 	instanceSize := g.IncusInstanceSize
@@ -170,6 +194,17 @@ func (g *InstanceGroup) Increase(ctx context.Context, delta int) (success int, e
 
 	g.m.Unlock()
 
+	// Clean up stale StateCreating VMs that don't exist in Incus
+	if creatingCount > 0 {
+		cleaned := g.cleanupStaleCreatingVMs()
+		if cleaned > 0 {
+			// Recalculate delta after cleanup
+			delta = originalDelta - (creatingCount - cleaned)
+			g.log.Info("Recalculated delta after cleanup", "new_delta", delta, "cleaned", cleaned)
+		}
+	}
+
+	var lastErr error
 	for i := range delta {
 		name := os.Expand(namingScheme, naming)
 
@@ -178,13 +213,23 @@ func (g *InstanceGroup) Increase(ctx context.Context, delta int) (success int, e
 		save(g.StateFilePath, g.status)
 		g.m.Unlock()
 
-		err := incusprov.CreateVM(name, instanceSize, instanceImage)
-		if err != nil {
-			g.log.Error("Failed to create VM", "number", i, "request_delta", delta, "error", err)
+		g.log.Info("Creating VM", "name", name, "size", instanceSize, "image", instanceImage)
+
+		createErr := incusprov.CreateVM(name, instanceSize, instanceImage)
+		if createErr != nil {
+			g.log.Error("Failed to create VM", "name", name, "number", i, "request_delta", delta, "error", createErr)
+
+			// Mark as failed and clean up
+			g.m.Lock()
+			delete(g.status, name)
+			save(g.StateFilePath, g.status)
+			g.m.Unlock()
+
+			lastErr = createErr
 			continue
 		}
 
-		g.log.Info("Created VM", "number", i, "request_delta", delta)
+		g.log.Info("Successfully created VM", "name", name, "number", i, "request_delta", delta)
 
 		g.m.Lock()
 		g.status[name] = provider.StateRunning
@@ -193,6 +238,14 @@ func (g *InstanceGroup) Increase(ctx context.Context, delta int) (success int, e
 
 		success++
 	}
+
+	// Return error if no VMs were created successfully
+	if success == 0 && lastErr != nil {
+		err = lastErr
+		g.log.Error("Failed to create any VMs", "request_delta", delta, "error", err)
+	}
+
+	g.log.Info("VM creation completed", "requested", delta, "successful", success)
 	return
 }
 
@@ -248,4 +301,36 @@ func save(path string, state map[string]provider.State) (err error) {
 
 	err = os.WriteFile(path, data, 0644)
 	return
+}
+
+// cleanupStaleCreatingVMs removes VMs that are marked as StateCreating but don't exist in Incus
+func (g *InstanceGroup) cleanupStaleCreatingVMs() int {
+	g.m.Lock()
+	defer g.m.Unlock()
+
+	var toCleanup []string
+
+	for id, state := range g.status {
+		if state == provider.StateCreating {
+			// Check if VM actually exists in Incus
+			_, err := incusprov.GetVM(id)
+			if err != nil {
+				g.log.Warn("Found stale StateCreating VM, cleaning up", "vm", id, "error", err)
+				toCleanup = append(toCleanup, id)
+			}
+		}
+	}
+
+	// Clean up stale VMs
+	for _, id := range toCleanup {
+		delete(g.status, id)
+		g.log.Info("Cleaned up stale StateCreating VM", "vm", id)
+	}
+
+	if len(toCleanup) > 0 {
+		save(g.StateFilePath, g.status)
+		g.log.Info("Cleaned up stale VMs", "count", len(toCleanup))
+	}
+
+	return len(toCleanup)
 }

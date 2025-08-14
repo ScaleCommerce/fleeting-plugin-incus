@@ -36,15 +36,13 @@ func CreateVM(name, size, alias string) (err error) {
 
 	op, err := ic.CreateInstance(req)
 	if err != nil {
-		err = fmt.Errorf("failed to create instance: %w", err)
-		return
+		return fmt.Errorf("failed to create instance '%s' with image '%s': %w", name, alias, err)
 	}
 
 	// Wait for the operation to complete
 	err = op.Wait()
 	if err != nil {
-		err = fmt.Errorf("failed to create instance: %w", err)
-		return
+		return fmt.Errorf("failed to wait for instance '%s' creation: %w", name, err)
 	}
 
 	for {
@@ -75,6 +73,12 @@ func CreateVM(name, size, alias string) (err error) {
 }
 
 func DeleteVM(name string) (err error) {
+	// First check if instance exists
+	_, _, err = ic.GetInstanceFull(name)
+	if err != nil {
+		return fmt.Errorf("failed to get instance '%s': %w", name, err)
+	}
+
 	reqState := api.InstanceStatePut{
 		Action:  "stop",
 		Timeout: -1,
@@ -82,26 +86,22 @@ func DeleteVM(name string) (err error) {
 
 	op, err := ic.UpdateInstanceState(name, reqState, "")
 	if err != nil {
-		err = fmt.Errorf("failed to stop instance: %w", err)
-		return
+		return fmt.Errorf("failed to stop instance '%s': %w", name, err)
 	}
 
 	err = op.Wait()
 	if err != nil {
-		err = fmt.Errorf("failed to stop instance: %w", err)
-		return
+		return fmt.Errorf("failed to stop instance '%s': %w", name, err)
 	}
 
 	op, err = ic.DeleteInstance(name)
 	if err != nil {
-		err = fmt.Errorf("failed to delete instance: %w", err)
-		return
+		return fmt.Errorf("failed to delete instance '%s': %w", name, err)
 	}
 
 	err = op.Wait()
 	if err != nil {
-		err = fmt.Errorf("failed to delete instance: %w", err)
-		return
+		return fmt.Errorf("failed to delete instance '%s': %w", name, err)
 	}
 
 	return
