@@ -3,7 +3,7 @@ package fleetingincus
 // Version information for the fleeting-plugin-incus
 const (
 	// Version is the current version of the plugin
-	Version = "v0.2.1"
+	Version = "v0.2.2"
 
 	// ProviderID is the unique identifier for this provider
 	ProviderID = "incus"

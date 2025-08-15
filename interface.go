@@ -24,6 +24,7 @@ type InstanceGroup struct {
 	IncusNamingScheme     string `json:"incus_naming_scheme"`
 	IncusInstanceKeyPath  string `json:"incus_instance_key_path"`
 	IncusInstanceSize     string `json:"incus_instance_size"`
+	IncusDiskSize         string `json:"incus_disk_size"`         // Disk size for VMs (e.g., "100GiB")
 	IncusStartupTimeout   int    `json:"incus_startup_timeout"`   // Timeout in seconds for VM startup
 	IncusOperationTimeout int    `json:"incus_operation_timeout"` // Timeout in seconds for Incus operations
 	MaxInstances          int    `json:"max_instances"`
@@ -45,18 +46,18 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	g.log = log
 	g.settings = settings
 
-	g.log.Info("🚀 Plugin initialization", "action", "start")
+	g.log.Info("🚀 [INIT] Plugin initialization", "action", "start")
 
 	// Setup state file path
 	if g.StateFilePath == "" {
 		g.StateFilePath = "/var/lib/fleeting-plugin-incus/state.json"
 	}
-	g.log.Debug("📁 Configuring state file", "path", g.StateFilePath)
+	g.log.Debug("📁 [INIT] Configuring state file", "path", g.StateFilePath)
 
 	// Create state directory and load existing state
 	os.MkdirAll(filepath.Dir(g.StateFilePath), 0755)
 	g.status, _ = load(g.StateFilePath)
-	g.log.Info("💾 State file loaded", "existing_vms", len(g.status))
+	g.log.Info("💾 [INIT] State file loaded", "existing_vms", len(g.status))
 
 	// Set default configuration values
 	if g.IncusNamingScheme == "" {
@@ -66,7 +67,10 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		g.IncusImage = "runner-base" // Use local base image by default
 	}
 	if g.IncusInstanceSize == "" {
-		g.IncusInstanceSize = "c5-m10" // 1 CPU, 1GB RAM - more descriptive than t2.micro
+		g.IncusInstanceSize = "c1-m2" // 1 CPU, 1GB RAM - more descriptive than t2.micro
+	}
+	if g.IncusDiskSize == "" {
+		g.IncusDiskSize = "10GiB" // Default 100GB root disk
 	}
 	if g.IncusStartupTimeout == 0 {
 		g.IncusStartupTimeout = 120 // 2 minutes for VM startup
@@ -80,17 +84,18 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 
 	// Validate configuration
 	if g.IncusInstanceKeyPath == "" {
-		g.log.Warn("⚠️  SSH key path not configured", "config_key", "incus_instance_key_path")
+		g.log.Warn("⚠️ [INIT] SSH key path not configured", "config_key", "incus_instance_key_path")
 	} else {
 		if _, err := os.Stat(g.IncusInstanceKeyPath); os.IsNotExist(err) {
-			g.log.Error("❌ SSH key file not found", "path", g.IncusInstanceKeyPath)
+			g.log.Error("❌ [INIT] SSH key file not found", "path", g.IncusInstanceKeyPath)
 			return provider.ProviderInfo{}, fmt.Errorf("SSH key file not found: %s", g.IncusInstanceKeyPath)
 		}
 	}
 
-	g.log.Info("⚙️  Configuration validated",
+	g.log.Info("⚙️ [INIT] Configuration validated",
 		"image", g.IncusImage,
 		"size", g.IncusInstanceSize,
+		"disk_size", g.IncusDiskSize,
 		"naming_scheme", g.IncusNamingScheme,
 		"max_instances", g.MaxInstances,
 		"startup_timeout", g.IncusStartupTimeout,
@@ -98,14 +103,14 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		"ssh_key_path", g.IncusInstanceKeyPath)
 
 	// Connect to Incus
-	g.log.Info("🔌 Connecting to Incus daemon")
+	g.log.Info("🔌 [INIT] Connecting to Incus daemon")
 	err = incusprov.ConnectIncus()
 	if err != nil {
-		g.log.Error("❌ Incus connection failed", "error", err)
+		g.log.Error("❌ [INIT] Incus connection failed", "error", err)
 		return provider.ProviderInfo{}, err
 	}
 
-	g.log.Info("✅ Plugin ready",
+	g.log.Info("✅ [INIT] Plugin ready",
 		"provider_id", ProviderID,
 		"version", Version,
 		"max_instances", g.MaxInstances,
@@ -305,7 +310,8 @@ func (g *InstanceGroup) Increase(ctx context.Context, delta int) (success int, e
 			"vm_name", name,
 			"progress", fmt.Sprintf("%d/%d", vmNumber, delta),
 			"image", instanceImage,
-			"size", instanceSize)
+			"size", instanceSize,
+			"disk_size", g.IncusDiskSize)
 
 		// Mark VM as creating
 		g.m.Lock()
@@ -314,7 +320,7 @@ func (g *InstanceGroup) Increase(ctx context.Context, delta int) (success int, e
 		g.m.Unlock()
 
 		// Create the VM
-		createErr := incusprov.CreateVMWithTimeout(name, instanceSize, instanceImage, startupTimeout)
+		createErr := incusprov.CreateVMWithDiskSize(name, instanceSize, instanceImage, startupTimeout, g.IncusDiskSize)
 		if createErr != nil {
 			g.log.Error("❌ [CREATE] VM creation failed",
 				"vm_name", name,

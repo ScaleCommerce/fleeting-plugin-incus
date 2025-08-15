@@ -10,7 +10,8 @@
     [runners.autoscaler.plugin_config]
       incus_image = "runner-base"                    # Incus image/alias to use
       incus_instance_key_path = "/opt/ssh-fleeting/id_ed25519"  # SSH private key for VM access
-      incus_instance_size = "c1-m1"                  # VM size: c1-m1 (1 CPU, 1GB) or t2.micro (AWS-style)
+      incus_instance_size = "c5-m10"                 # VM size: c5-m10 (5 CPU, 10GB) or t2.micro (AWS-style)
+      incus_disk_size = "100GiB"                     # Root disk size (default: 100GiB)
       incus_startup_timeout = 120                    # VM startup timeout in seconds (default: 120)
       incus_operation_timeout = 60                   # Incus operation timeout in seconds (default: 60)
       incus_naming_scheme = "runner-$random"         # Naming scheme for VMs (default: runner-$random)
@@ -31,7 +32,8 @@
 |--------|---------|-------------|
 | `incus_image` | `runner-base` | Incus image or alias to use for VMs |
 | `incus_instance_key_path` | *required* | Path to SSH private key for VM access |
-| `incus_instance_size` | `c1-m1` | VM size specification (see below) |
+| `incus_instance_size` | `c1-m2` | VM size specification (CPU/RAM, see below) |
+| `incus_disk_size` | `10GiB` | Root disk size for VMs (e.g., `50GiB`, `200GiB`) |
 | `incus_startup_timeout` | `120` | Timeout in seconds for VM startup |
 | `incus_operation_timeout` | `60` | Timeout in seconds for Incus operations |
 | `incus_naming_scheme` | `runner-$random` | VM naming pattern |
@@ -43,6 +45,17 @@ You can specify VM sizes in two formats:
 
 1. **Incus format**: `c<CPU>-m<RAM_GB>` (e.g., `c2-m4` = 2 CPUs, 4GB RAM)
 2. **AWS format**: `t2.micro`, `t3.small`, etc. (Incus maps these to equivalent specs)
+
+### Disk Size Configuration
+
+The `incus_disk_size` option controls the root disk size for VMs:
+
+- **Default**: `100GiB` (recommended for GitLab CI/CD workloads)
+- **Format**: Use standard size units (`GiB`, `GB`, `TiB`, etc.)
+- **Examples**: `50GiB`, `200GiB`, `1TiB`
+- **Minimum**: At least `10GiB` required for basic operations
+
+**Note**: Disk size is set during VM creation and cannot be changed later without recreating the VM.
 
 ### ⚠️ Important: max_instances Configuration
 

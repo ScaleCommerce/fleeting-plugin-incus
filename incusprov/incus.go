@@ -16,7 +16,7 @@ var (
 func ConnectIncus() (err error) {
 	ic, err = incus.ConnectIncusUnix("", nil)
 	if err != nil {
-		return fmt.Errorf("🔌 failed to connect to incus daemon: %w", err)
+		return fmt.Errorf("🔌 [INIT] failed to connect to incus daemon: %w", err)
 	}
 
 	return nil
@@ -27,6 +27,10 @@ func CreateVM(name, size, alias string) (err error) {
 }
 
 func CreateVMWithTimeout(name, size, alias string, timeoutSeconds int) (err error) {
+	return CreateVMWithDiskSize(name, size, alias, timeoutSeconds, "100GiB")
+}
+
+func CreateVMWithDiskSize(name, size, alias string, timeoutSeconds int, diskSize string) (err error) {
 	req := api.InstancesPost{
 		Name: name,
 		Source: api.InstanceSource{
@@ -36,18 +40,28 @@ func CreateVMWithTimeout(name, size, alias string, timeoutSeconds int) (err erro
 		Type:         "virtual-machine",
 		InstanceType: size,
 		Start:        true,
+		InstancePut: api.InstancePut{
+			Devices: map[string]map[string]string{
+				"root": {
+					"type": "disk",
+					"path": "/",
+					"pool": "default",
+					"size": diskSize,
+				},
+			},
+		},
 	}
 
 	// Create the instance
 	op, err := ic.CreateInstance(req)
 	if err != nil {
-		return fmt.Errorf("🔨 failed to create VM '%s' with image '%s': %w", name, alias, err)
+		return fmt.Errorf("🔨 [CREATE] failed to create VM '%s' with image '%s': %w", name, alias, err)
 	}
 
 	// Wait for creation to complete
 	err = op.Wait()
 	if err != nil {
-		return fmt.Errorf("⏰ failed to wait for VM '%s' creation: %w", name, err)
+		return fmt.Errorf("⏰ [CREATE] failed to wait for VM '%s' creation: %w", name, err)
 	}
 
 	// Wait for system to be ready
@@ -64,7 +78,7 @@ func CreateVMWithTimeout(name, size, alias string, timeoutSeconds int) (err erro
 			// VM agent not ready yet, continue waiting
 			continue
 		} else if err != nil {
-			return fmt.Errorf("⚠️  failed to check system status for VM '%s' (retry %d/%d): %w", name, retry, maxRetries, err)
+			return fmt.Errorf("⚠️ [CREATE] failed to check system status for VM '%s' (retry %d/%d): %w", name, retry, maxRetries, err)
 		}
 
 		err = op.Wait()
@@ -72,7 +86,7 @@ func CreateVMWithTimeout(name, size, alias string, timeoutSeconds int) (err erro
 			// VM agent not ready yet, continue waiting
 			continue
 		} else if err != nil {
-			return fmt.Errorf("⚠️  system not ready for VM '%s' (retry %d/%d): %w", name, retry, maxRetries, err)
+			return fmt.Errorf("⚠️ [CREATE] system not ready for VM '%s' (retry %d/%d): %w", name, retry, maxRetries, err)
 		}
 
 		// System is ready
@@ -86,7 +100,7 @@ func DeleteVM(name string) (err error) {
 	// First check if instance exists
 	_, _, err = ic.GetInstanceFull(name)
 	if err != nil {
-		return fmt.Errorf("🔍 failed to find VM '%s': %w", name, err)
+		return fmt.Errorf("🔍 [DELETE] failed to find VM '%s': %w", name, err)
 	}
 
 	// Stop the instance
@@ -97,23 +111,23 @@ func DeleteVM(name string) (err error) {
 
 	op, err := ic.UpdateInstanceState(name, reqState, "")
 	if err != nil {
-		return fmt.Errorf("⏹️  failed to stop VM '%s': %w", name, err)
+		return fmt.Errorf("⏹️ [DELETE] failed to stop VM '%s': %w", name, err)
 	}
 
 	err = op.Wait()
 	if err != nil {
-		return fmt.Errorf("⏰ failed to wait for VM '%s' to stop: %w", name, err)
+		return fmt.Errorf("⏰ [DELETE] failed to wait for VM '%s' to stop: %w", name, err)
 	}
 
 	// Delete the instance
 	op, err = ic.DeleteInstance(name)
 	if err != nil {
-		return fmt.Errorf("🗑️  failed to delete VM '%s': %w", name, err)
+		return fmt.Errorf("🗑️ [DELETE] failed to delete VM '%s': %w", name, err)
 	}
 
 	err = op.Wait()
 	if err != nil {
-		return fmt.Errorf("⏰ failed to wait for VM '%s' deletion: %w", name, err)
+		return fmt.Errorf("⏰ [DELETE] failed to wait for VM '%s' deletion: %w", name, err)
 	}
 
 	return
@@ -122,17 +136,17 @@ func DeleteVM(name string) (err error) {
 func GetVM(name string) (internalIP string, err error) {
 	inst, _, err := ic.GetInstanceFull(name)
 	if err != nil {
-		err = fmt.Errorf("🔍 failed to get VM info for '%s': %w", name, err)
+		err = fmt.Errorf("🔍 [CONNECT] failed to get VM info for '%s': %w", name, err)
 		return
 	}
 
 	if !inst.IsActive() {
-		err = fmt.Errorf("🚫 VM '%s' is not active", name)
+		err = fmt.Errorf("🚫 [CONNECT] VM '%s' is not active", name)
 		return
 	}
 
 	if inst.State == nil || inst.State.Network == nil {
-		err = fmt.Errorf("🌐 no network information available for VM '%s'", name)
+		err = fmt.Errorf("🌐 [CONNECT] no network information available for VM '%s'", name)
 		return
 	}
 
@@ -154,6 +168,6 @@ func GetVM(name string) (internalIP string, err error) {
 		}
 	}
 
-	err = fmt.Errorf("🌐 no suitable IP address found for VM '%s'", name)
+	err = fmt.Errorf("🌐 [CONNECT] no suitable IP address found for VM '%s'", name)
 	return
 }
