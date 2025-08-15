@@ -10,14 +10,15 @@ import (
 	"gitlab.com/gitlab-org/fleeting/fleeting/plugin"
 )
 
-const version string = "v0.1.0"
-
 func main() {
 	showVersion := flag.Bool("version", false, "Show version information and exit")
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println(version)
+		fmt.Printf("fleeting-plugin-incus %s\n", fleetingincus.Version)
+		fmt.Printf("Build: %s\n", fleetingincus.BuildInfo)
+		fmt.Printf("Date: %s\n", fleetingincus.BuildDate)
+		fmt.Printf("Commit: %s\n", fleetingincus.GitCommit)
 		os.Exit(0)
 	}
 
