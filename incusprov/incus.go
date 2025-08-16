@@ -2,7 +2,6 @@ package incusprov
 
 import (
 	"fmt"
-	"slices"
 	"time"
 
 	incus "github.com/lxc/incus/client"
@@ -157,10 +156,6 @@ func GetVM(name string) (internalIP string, err error) {
 		}
 
 		for _, addr := range net.Addresses {
-			if slices.Contains([]string{"link", "local"}, addr.Scope) {
-				continue
-			}
-
 			if addr.Family == "inet" && netName != "docker0" {
 				internalIP = addr.Address
 				return
@@ -170,4 +165,10 @@ func GetVM(name string) (internalIP string, err error) {
 
 	err = fmt.Errorf("🌐 [CONNECT] no suitable IP address found for VM '%s'", name)
 	return
+}
+
+// VMExists checks if a VM exists in Incus (regardless of network status)
+func VMExists(name string) bool {
+	_, _, err := ic.GetInstanceFull(name)
+	return err == nil
 }

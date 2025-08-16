@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"fleeting-plugin-incus/incusprov"
@@ -24,9 +25,10 @@ type InstanceGroup struct {
 	IncusNamingScheme     string `json:"incus_naming_scheme"`
 	IncusInstanceKeyPath  string `json:"incus_instance_key_path"`
 	IncusInstanceSize     string `json:"incus_instance_size"`
-	IncusDiskSize         string `json:"incus_disk_size"`         // Disk size for VMs (e.g., "100GiB")
-	IncusStartupTimeout   int    `json:"incus_startup_timeout"`   // Timeout in seconds for VM startup
-	IncusOperationTimeout int    `json:"incus_operation_timeout"` // Timeout in seconds for Incus operations
+	IncusDiskSize         string `json:"incus_disk_size"`           // Disk size for VMs (e.g., "100GiB")
+	IncusStartupTimeout   int    `json:"incus_startup_timeout"`     // Timeout in seconds for VM startup
+	IncusOperationTimeout int    `json:"incus_operation_timeout"`   // Timeout in seconds for Incus operations
+	IncusDeleteOnlyOwnVMs bool   `json:"incus_delete_only_own_vms"` // Only delete VMs matching our naming scheme
 	MaxInstances          int    `json:"max_instances"`
 	StateFilePath         string `json:"state_file_path"`
 
@@ -77,6 +79,10 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}
 	if g.IncusOperationTimeout == 0 {
 		g.IncusOperationTimeout = 60 // 1 minute for Incus operations
+	}
+	// Default: Only delete VMs that match our naming scheme for safety
+	if !g.IncusDeleteOnlyOwnVMs {
+		g.IncusDeleteOnlyOwnVMs = true
 	}
 	if g.MaxInstances == 0 {
 		g.MaxInstances = 20 // More reasonable default
@@ -180,12 +186,33 @@ func (g *InstanceGroup) ConnectInfo(ctx context.Context, name string) (provider.
 	return info, nil
 }
 
+// matchesNamingScheme checks if a VM name matches our naming scheme (excluding $random)
+func (g *InstanceGroup) matchesNamingScheme(vmName string) bool {
+	// Remove $random from the naming scheme to get the prefix
+	schemePrefix := strings.ReplaceAll(g.IncusNamingScheme, "$random", "")
+
+	// VM name should start with this prefix
+	return strings.HasPrefix(vmName, schemePrefix)
+}
+
 // Decrease removes the specified instances from the instance group. It
 // returns instance IDs of successful requests for removal.
 func (g *InstanceGroup) Decrease(ctx context.Context, instances []string) (removed []string, err error) {
 	g.log.Info("📉 [DELETE] Scale down request", "vms_to_delete", len(instances), "vm_names", instances)
 
 	for i, name := range instances {
+		// Skip runner-base
+		if name == "runner-base" {
+			continue
+		}
+		// Safety check: Only delete VMs that match our naming scheme if enabled
+		if g.IncusDeleteOnlyOwnVMs && !g.matchesNamingScheme(name) {
+			g.log.Warn("🛡️ [DELETE] Skipping VM - doesn't match naming scheme",
+				"vm_name", name,
+				"naming_scheme", g.IncusNamingScheme,
+				"safety_enabled", g.IncusDeleteOnlyOwnVMs)
+			continue
+		}
 		vmNumber := i + 1
 		g.log.Info("🗑️ [DELETE] Processing VM",
 			"vm_name", name,
@@ -282,14 +309,28 @@ func (g *InstanceGroup) Increase(ctx context.Context, delta int) (success int, e
 	startupTimeout := g.IncusStartupTimeout
 	g.m.Unlock()
 
-	// Clean up stale StateCreating VMs that don't exist in Incus
-	if creatingCount > 0 {
-		g.log.Info("🧹 [CLEANUP] Checking for stale VMs", "vms_to_check", creatingCount)
-		cleaned := g.cleanupStaleCreatingVMs()
+	// Clean up ALL stale VMs that don't exist in Incus (not just StateCreating)
+	if totalVMs > 0 {
+		g.log.Info("🧹 [CLEANUP] Checking for stale VMs", "vms_to_check", totalVMs)
+		cleaned := g.cleanupAllStaleVMs()
 		if cleaned > 0 {
-			// Recalculate delta after cleanup
-			delta = originalDelta - (creatingCount - cleaned)
-			g.log.Info("♻️ [CLEANUP] Cleanup completed", "stale_vms_removed", cleaned, "new_delta", delta)
+			// Recalculate counts after cleanup
+			g.m.Lock()
+			newTotal := len(g.status)
+			newCreating := 0
+			for id := range g.status {
+				if g.status[id] == provider.StateCreating {
+					newCreating++
+				}
+			}
+			g.m.Unlock()
+
+			delta = originalDelta - newCreating
+			g.log.Info("♻️ [CLEANUP] Cleanup completed",
+				"stale_vms_removed", cleaned,
+				"new_total", newTotal,
+				"new_creating", newCreating,
+				"new_delta", delta)
 		}
 	}
 
@@ -434,27 +475,62 @@ func (g *InstanceGroup) cleanupStaleCreatingVMs() int {
 
 	var toCleanup []string
 
-	g.log.Debug("🔍 [CLEANUP] Scanning for stale VMs")
+	g.log.Debug("🔍 [CLEANUP] Scanning for stale creating VMs")
 	for id, state := range g.status {
 		if state == provider.StateCreating {
 			g.log.Debug("⏳ [CLEANUP] Checking VM state", "vm_name", id)
 			// Check if VM actually exists in Incus
-			_, err := incusprov.GetVM(id)
-			if err != nil {
-				g.log.Warn("👻 [CLEANUP] Found stale VM", "vm_name", id, "reason", "not_found_in_incus")
+			if !incusprov.VMExists(id) {
+				g.log.Warn("👻 [CLEANUP] Found stale creating VM", "vm_name", id, "reason", "not_found_in_incus")
 				toCleanup = append(toCleanup, id)
 			} else {
-				g.log.Debug("✓ [CLEANUP] VM exists in Incus", "vm_name", id)
+				g.log.Debug("✓ [CLEANUP] Creating VM exists in Incus", "vm_name", id)
 			}
 		}
 	}
 
 	// Clean up stale VMs
 	if len(toCleanup) > 0 {
-		g.log.Info("🧹 [CLEANUP] Cleaning up stale VMs", "vms_to_cleanup", len(toCleanup), "vm_names", toCleanup)
+		g.log.Info("🧹 [CLEANUP] Cleaning up stale creating VMs", "vms_to_cleanup", len(toCleanup), "vm_names", toCleanup)
 		for _, id := range toCleanup {
 			delete(g.status, id)
-			g.log.Debug("🗑️ [CLEANUP] Removed from state", "vm_name", id)
+			g.log.Debug("🗑️ [CLEANUP] Removed creating VM from state", "vm_name", id)
+		}
+		save(g.StateFilePath, g.status)
+	} else {
+		g.log.Debug("✓ [CLEANUP] No stale creating VMs found")
+	}
+
+	return len(toCleanup)
+}
+
+// cleanupAllStaleVMs removes ALL VMs from state that don't exist in Incus anymore
+func (g *InstanceGroup) cleanupAllStaleVMs() int {
+	g.m.Lock()
+	defer g.m.Unlock()
+
+	var toCleanup []string
+
+	g.log.Debug("🔍 [CLEANUP] Scanning ALL VMs for stale entries")
+	for id, state := range g.status {
+		g.log.Debug("🔍 [CLEANUP] Checking VM", "vm_name", id, "state", state)
+
+		// Check if VM actually exists in Incus
+		if !incusprov.VMExists(id) {
+			g.log.Warn("👻 [CLEANUP] Found stale VM", "vm_name", id, "state", state, "reason", "not_found_in_incus")
+			toCleanup = append(toCleanup, id)
+		} else {
+			g.log.Debug("✓ [CLEANUP] VM exists in Incus", "vm_name", id, "state", state)
+		}
+	}
+
+	// Clean up stale VMs
+	if len(toCleanup) > 0 {
+		g.log.Info("🧹 [CLEANUP] Cleaning up ALL stale VMs", "vms_to_cleanup", len(toCleanup), "vm_names", toCleanup)
+		for _, id := range toCleanup {
+			oldState := g.status[id]
+			delete(g.status, id)
+			g.log.Debug("🗑️ [CLEANUP] Removed VM from state", "vm_name", id, "old_state", oldState)
 		}
 		save(g.StateFilePath, g.status)
 	} else {

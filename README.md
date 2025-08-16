@@ -15,6 +15,7 @@
       incus_startup_timeout = 120                    # VM startup timeout in seconds (default: 120)
       incus_operation_timeout = 60                   # Incus operation timeout in seconds (default: 60)
       incus_naming_scheme = "runner-$random"         # Naming scheme for VMs (default: runner-$random)
+      incus_delete_only_own_vms = true               # Only delete VMs matching naming scheme (default: true)
       max_instances = 5                              # Maximum number of VMs (default: 5)
 
     [runners.autoscaler.connector_config]
@@ -37,6 +38,7 @@
 | `incus_startup_timeout` | `120` | Timeout in seconds for VM startup |
 | `incus_operation_timeout` | `60` | Timeout in seconds for Incus operations |
 | `incus_naming_scheme` | `runner-$random` | VM naming pattern |
+| `incus_delete_only_own_vms` | `true` | Only delete VMs matching naming scheme (safety) |
 | `max_instances` | `5` | Maximum number of concurrent VMs |
 
 ### VM Size Specifications
@@ -141,77 +143,7 @@ systemctl restart gitlab-runner
 
 ### Common Issues
 
-#### 1. `max size option exceeds instance group's max size`
+Check logs:
 ```bash
-# Check current configuration
-fleeting-plugin-incus --version
-
-# View logs  
 sudo journalctl -u gitlab-runner -f
-
-# Fix: Adjust max_instances in GitLab Runner config
 ```
-
-#### 2. `SSH key file does not exist`
-```bash
-# Check if SSH key exists
-ls -la /opt/ssh-fleeting/id_ed25519
-
-# Generate SSH key if missing
-sudo mkdir -p /opt/ssh-fleeting
-sudo ssh-keygen -t ed25519 -f /opt/ssh-fleeting/id_ed25519 -N ""
-```
-
-#### 3. `failed to create VM with image 'runner-base'`
-```bash
-# List available images
-incus image list
-
-# Create base image if missing (see installation section above)
-```
-
-#### 4. VMs created but jobs fail
-```bash
-# Test SSH connection to VM
-ssh -i /opt/ssh-fleeting/id_ed25519 root@<VM_IP>
-
-# Check if docker is running in VM
-incus exec <VM_NAME> -- docker ps
-```
-
-## Development
-
-### Logging Style Guide
-
-The plugin uses a consistent logging format:
-
-#### **Message Structure:**
-- **Main Actions**: `Sentence case` (e.g. `Plugin ready`, `Scale up request`)
-- **Sub Actions**: `Emoji [STAGE] Action` (e.g. `🔨 [CREATE] Creating VM`, `🗑️ [DELETE] Stopping VM`)
-- **Status Messages**: Consistent terminology (`completed`, `failed`, `ready`)
-- **Spacing**: Exactly **one space** between emoji and `[STAGE]`
-
-#### **Lifecycle Stages:**
-- `[INIT]` - Plugin initialization
-- `[ANALYSIS]` - State analysis and planning
-- `[CLEANUP]` - Cleanup operations
-- `[CREATE]` - VM creation process
-- `[DELETE]` - VM deletion process
-- `[CONNECT]` - Connection info and SSH setup
-
-#### **Emojis:**
-- 🚀 Plugin lifecycle
-- 📈📉 Scaling operations  
-- 🔨 VM creation
-- 🗑️ VM deletion
-- ✅ Success
-- ❌ Errors
-- ⚠️ Warnings
-- 🔍 Information gathering
-
-#### **Field Names:**
-- `vm_name` (for individual VMs)
-- `vms_to_create` / `vms_to_delete` (for counts with clear intent)
-- `vms_to_check` / `vms_to_cleanup` (for other operations)
-- `error` (for error messages)
-- `progress` (for operation progress)
